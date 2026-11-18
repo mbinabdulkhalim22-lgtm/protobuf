@@ -73,6 +73,32 @@ cc_test(
 )
 
 cc_library(
+    name = "status_macros",
+    hdrs = ["internal/status_macros.h"],
+    copts = COPTS,
+    strip_include_prefix = "/src",
+    deps = [
+        "//src/google/protobuf:port",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/status",
+    ],
+)
+
+cc_test(
+    name = "status_macros_test",
+    srcs = ["internal/status_macros_test.cc"],
+    copts = COPTS,
+    deps = [
+        ":status_macros",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "message_path",
     srcs = ["internal/message_path.cc"],
     hdrs = ["internal/message_path.h"],
@@ -81,7 +107,6 @@ cc_library(
     deps = [
         "//src/google/protobuf",
         "//src/google/protobuf:port",
-        "@abseil-cpp//absl/cleanup",
         "@abseil-cpp//absl/strings",
     ],
 )
@@ -224,6 +249,7 @@ cc_library(
     strip_include_prefix = "/src",
     deps = [
         ":lexer",
+        ":status_macros",
         ":untyped_message",
         "//:type_cc_proto",
         "//src/google/protobuf",
@@ -255,6 +281,7 @@ cc_library(
     deps = [
         ":descriptor_traits",
         ":lexer",
+        ":status_macros",
         ":zero_copy_buffered_stream",
         "//:type_cc_proto",
         "//src/google/protobuf",
