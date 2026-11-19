@@ -252,13 +252,25 @@ struct alignas(InternalMetadata::kContainerAlignment)
   std::string unknown_fields;
 
 #if defined(PROTOBUF_SMALLER_MESSAGE_LITE)
-  Container(Arena*, const ClassData* input_class_data)
-      : ContainerBase(input_class_data) {}
+  Container(Arena* arena_param, const ClassData* input_class_data)
+      : ContainerBase(input_class_data) {
+    if (arena_param != nullptr) arena_param->OwnDestructor(&unknown_fields);
+  }
 #else
-  explicit Container(Arena* arena_param) : ContainerBase(arena_param) {}
+  explicit Container(Arena* arena_param) : ContainerBase(arena_param) {
+    if (arena_param != nullptr) arena_param->OwnDestructor(&unknown_fields);
+  }
 #endif
 
   using InternalArenaConstructable_ = void;
+  // An arena never destroys the container itself, only `unknown_fields` (see
+  // the constructors). `ContainerBase` must stay valid until the arena
+  // releases its memory, because other arena cleanups can still read it
+  // through the message. For example, a message registers its `ArenaDtor`
+  // before it allocates the container, so `ArenaDtor` runs after the cleanup
+  // of the container, and destroying a `RepeatedField<absl::Cord>` there looks
+  // up the arena of the message.
+  using DestructorSkippable_ = void;
 };
 
 template <>
