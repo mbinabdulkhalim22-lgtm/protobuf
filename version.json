@@ -1,4 +1,4 @@
-{
+version.json{
     "31.x": {
         "protoc_version": "31.0-dev",
         "lts": false,
