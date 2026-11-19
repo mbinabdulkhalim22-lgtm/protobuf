@@ -1,32 +1,9 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 #import "GPBExtensionRegistry.h"
 
@@ -34,20 +11,20 @@
 #import "GPBDescriptor.h"
 
 @implementation GPBExtensionRegistry {
-  // TODO(dmaclach): Reimplement with CFDictionaries that don't use
-  // objects as keys.
-  NSMutableDictionary *mutableClassMap_;
+  CFMutableDictionaryRef mutableClassMap_;
 }
 
 - (instancetype)init {
   if ((self = [super init])) {
-    mutableClassMap_ = [[NSMutableDictionary alloc] init];
+    // The keys are ObjC classes, so straight up ptr comparisons are fine.
+    mutableClassMap_ =
+        CFDictionaryCreateMutable(kCFAllocatorDefault, 0, NULL, &kCFTypeDictionaryValueCallBacks);
   }
   return self;
 }
 
 - (void)dealloc {
-  [mutableClassMap_ release];
+  CFRelease(mutableClassMap_);
   [super dealloc];
 }
 
@@ -59,22 +36,8 @@
 
 - (instancetype)copyWithZone:(NSZone *)zone {
   GPBExtensionRegistry *result = [[[self class] allocWithZone:zone] init];
-  if (result && mutableClassMap_.count) {
-    [result->mutableClassMap_ addEntriesFromDictionary:mutableClassMap_];
-  }
+  [result addExtensions:self];
   return result;
-}
-
-- (NSMutableDictionary *)extensionMapForContainingMessageClass:
-        (Class)containingMessageClass {
-  NSMutableDictionary *extensionMap =
-      [mutableClassMap_ objectForKey:containingMessageClass];
-  if (extensionMap == nil) {
-    extensionMap = [NSMutableDictionary dictionary];
-    [mutableClassMap_ setObject:extensionMap
-                         forKey:(id<NSCopying>)containingMessageClass];
-  }
-  return extensionMap;
 }
 
 - (void)addExtension:(GPBExtensionDescriptor *)extension {
@@ -83,17 +46,51 @@
   }
 
   Class containingMessageClass = extension.containingMessageClass;
-  NSMutableDictionary *extensionMap =
-      [self extensionMapForContainingMessageClass:containingMessageClass];
-  [extensionMap setObject:extension forKey:@(extension.fieldNumber)];
+  CFMutableDictionaryRef extensionMap =
+      (CFMutableDictionaryRef)CFDictionaryGetValue(mutableClassMap_, containingMessageClass);
+  if (extensionMap == nil) {
+    // Use a custom dictionary here because the keys are numbers and conversion
+    // back and forth from NSNumber isn't worth the cost.
+    extensionMap =
+        CFDictionaryCreateMutable(kCFAllocatorDefault, 0, NULL, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(mutableClassMap_, containingMessageClass, extensionMap);
+    CFRelease(extensionMap);
+  }
+
+  ssize_t key = extension.fieldNumber;
+  CFDictionarySetValue(extensionMap, (const void *)key, extension);
 }
 
 - (GPBExtensionDescriptor *)extensionForDescriptor:(GPBDescriptor *)descriptor
                                        fieldNumber:(NSInteger)fieldNumber {
   Class messageClass = descriptor.messageClass;
-  NSDictionary *extensionMap =
-      [mutableClassMap_ objectForKey:messageClass];
-  return [extensionMap objectForKey:@(fieldNumber)];
+  CFMutableDictionaryRef extensionMap =
+      (CFMutableDictionaryRef)CFDictionaryGetValue(mutableClassMap_, messageClass);
+  ssize_t key = fieldNumber;
+  GPBExtensionDescriptor *result =
+      (extensionMap ? CFDictionaryGetValue(extensionMap, (const void *)key) : nil);
+  return result;
+}
+
+static void CopyKeyValue(const void *key, const void *value, void *context) {
+  CFMutableDictionaryRef extensionMap = (CFMutableDictionaryRef)context;
+  CFDictionarySetValue(extensionMap, key, value);
+}
+
+static void CopySubDictionary(const void *key, const void *value, void *context) {
+  CFMutableDictionaryRef mutableClassMap = (CFMutableDictionaryRef)context;
+  Class containingMessageClass = key;
+  CFMutableDictionaryRef otherExtensionMap = (CFMutableDictionaryRef)value;
+
+  CFMutableDictionaryRef extensionMap =
+      (CFMutableDictionaryRef)CFDictionaryGetValue(mutableClassMap, containingMessageClass);
+  if (extensionMap == nil) {
+    extensionMap = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0, otherExtensionMap);
+    CFDictionarySetValue(mutableClassMap, containingMessageClass, extensionMap);
+    CFRelease(extensionMap);
+  } else {
+    CFDictionaryApplyFunction(otherExtensionMap, CopyKeyValue, extensionMap);
+  }
 }
 
 - (void)addExtensions:(GPBExtensionRegistry *)registry {
@@ -101,14 +98,7 @@
     // In the case where there are no extensions just ignore.
     return;
   }
-  NSMutableDictionary *otherClassMap = registry->mutableClassMap_;
-  for (Class containingMessageClass in otherClassMap) {
-    NSMutableDictionary *extensionMap =
-        [self extensionMapForContainingMessageClass:containingMessageClass];
-    NSMutableDictionary *otherExtensionMap =
-        [registry extensionMapForContainingMessageClass:containingMessageClass];
-    [extensionMap addEntriesFromDictionary:otherExtensionMap];
-  }
+  CFDictionaryApplyFunction(registry->mutableClassMap_, CopySubDictionary, mutableClassMap_);
 }
 
 #pragma clang diagnostic pop

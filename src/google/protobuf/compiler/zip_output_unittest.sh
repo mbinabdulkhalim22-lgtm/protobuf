@@ -2,33 +2,10 @@
 #
 # Protocol Buffers - Google's data interchange format
 # Copyright 2009 Google Inc.  All rights reserved.
-# https://developers.google.com/protocol-buffers/
 #
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are
-# met:
-#
-#     * Redistributions of source code must retain the above copyright
-# notice, this list of conditions and the following disclaimer.
-#     * Redistributions in binary form must reproduce the above
-# copyright notice, this list of conditions and the following disclaimer
-# in the documentation and/or other materials provided with the
-# distribution.
-#     * Neither the name of Google Inc. nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# Use of this source code is governed by a BSD-style
+# license that can be found in the LICENSE file or at
+# https://developers.google.com/open-source/licenses/bsd
 
 # Author: kenton@google.com (Kenton Varda)
 #
@@ -41,6 +18,8 @@ fail() {
 
 TEST_TMPDIR=.
 PROTOC=./protoc
+JAR=jar
+UNZIP=unzip
 
 echo '
   syntax = "proto2";
@@ -57,8 +36,9 @@ $PROTOC \
     || fail 'protoc failed.'
 
 echo "Testing output to zip..."
-if unzip -h > /dev/null; then
-  unzip -t $TEST_TMPDIR/testzip.zip > $TEST_TMPDIR/testzip.list || fail 'unzip failed.'
+if $UNZIP -h > /dev/null; then
+  $UNZIP -t $TEST_TMPDIR/testzip.zip > $TEST_TMPDIR/testzip.list \
+    || fail 'unzip failed.'
 
   grep 'testing: testzip\.pb\.cc *OK$' $TEST_TMPDIR/testzip.list > /dev/null \
     || fail 'testzip.pb.cc not found in output zip.'
@@ -73,8 +53,14 @@ else
 fi
 
 echo "Testing output to jar..."
-if jar c $TEST_TMPDIR/testzip.proto > /dev/null; then
-  jar tf $TEST_TMPDIR/testzip.jar > $TEST_TMPDIR/testzip.list || fail 'jar failed.'
+if $JAR c $TEST_TMPDIR/testzip.proto > /dev/null; then
+  $JAR tf $TEST_TMPDIR/testzip.jar > $TEST_TMPDIR/testzip.list \
+    || fail 'jar failed.'
+
+  # Check that -interface.jar timestamps are normalized:
+  if [[ "$(TZ=UTC $JAR tvf $TEST_TMPDIR/testzip.jar)" != *'Tue Jan 01 00:00:00 UTC 1980'* ]]; then
+    fail 'Zip did not contain normalized timestamps'
+  fi
 
   grep '^test/jar/Foo\.java$' $TEST_TMPDIR/testzip.list > /dev/null \
     || fail 'Foo.java not found in output jar.'

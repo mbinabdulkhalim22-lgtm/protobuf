@@ -1,0 +1,18 @@
+version.json{
+    "31.x": {
+        "protoc_version": "31.0-dev",
+        "lts": false,
+        "date": "2025-04-17",
+        "languages": {
+            "cpp": "6.31.0-dev",
+            "csharp": "3.31.0-dev",
+            "java": "4.31.0-dev",
+            "javascript": "3.31.0-dev",
+            "objectivec": "4.31.0-dev",
+            "php": "4.31.0-dev",
+            "python": "6.31.0-dev",
+            "ruby": "4.31.0-dev",
+            "rust": "4.31.0-dev"
+        }
+    }
+}

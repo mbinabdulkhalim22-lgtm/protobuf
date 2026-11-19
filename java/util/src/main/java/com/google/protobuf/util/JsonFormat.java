@@ -1,40 +1,21 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 package com.google.protobuf.util;
 
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.io.BaseEncoding;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonIOException;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -67,14 +48,15 @@ import com.google.protobuf.Timestamp;
 import com.google.protobuf.UInt32Value;
 import com.google.protobuf.UInt64Value;
 import com.google.protobuf.Value;
-
 import java.io.IOException;
 import java.io.Reader;
 import java.io.StringReader;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.text.ParseException;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -82,15 +64,15 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.logging.Logger;
+import javax.annotation.Nullable;
 
 /**
- * Utility classes to convert protobuf messages to/from JSON format. The JSON
- * format follows Proto3 JSON specification and only proto3 features are
- * supported. Proto2 only features (e.g., extensions and unknown fields) will
- * be discarded in the conversion. That is, when converting proto2 messages
- * to JSON format, extensions and unknown fields will be treated as if they
- * do not exist. This applies to proto2 messages embedded in proto3 messages
- * as well.
+ * Utility class to convert protobuf messages to/from the <a href=
+ * 'https://developers.google.com/protocol-buffers/docs/proto3#json'>Proto3 JSON format.</a>
+ * Only proto3 features are supported. Proto2 only features such as extensions and unknown fields
+ * are discarded in the conversion. That is, when converting proto2 messages to JSON format,
+ * extensions and unknown fields are treated as if they do not exist. This applies to proto2
+ * messages embedded in proto3 messages as well.
  */
 public class JsonFormat {
   private static final Logger logger = Logger.getLogger(JsonFormat.class.getName());
@@ -101,55 +83,200 @@ public class JsonFormat {
    * Creates a {@link Printer} with default configurations.
    */
   public static Printer printer() {
-    return new Printer(TypeRegistry.getEmptyTypeRegistry(), false, false, false);
+    return new Printer(
+        com.google.protobuf.TypeRegistry.getEmptyTypeRegistry(),
+        TypeRegistry.getEmptyTypeRegistry(),
+        ShouldPrintDefaults.ONLY_IF_PRESENT,
+        /* includingDefaultValueFields */ ImmutableSet.of(),
+        /* preservingProtoFieldNames */ false,
+        /* omittingInsignificantWhitespace */ false,
+        /* printingEnumsAsInts */ false,
+        /* sortingMapKeys */ false);
   }
 
-  /**
-   * A Printer converts protobuf message to JSON format.
-   */
+  private enum ShouldPrintDefaults {
+    ONLY_IF_PRESENT, // The "normal" behavior; the others add more compared to this baseline.
+    ALWAYS_PRINT_EXCEPT_MESSAGES_AND_ONEOFS,
+    ALWAYS_PRINT_WITHOUT_PRESENCE_FIELDS,
+    ALWAYS_PRINT_SPECIFIED_FIELDS
+  }
+
+  /** A Printer converts a protobuf message to the proto3 JSON format. */
   public static class Printer {
-    private final TypeRegistry registry;
-    private final boolean includingDefaultValueFields;
+    private final com.google.protobuf.TypeRegistry registry;
+    private final TypeRegistry oldRegistry;
+    private final ShouldPrintDefaults shouldPrintDefaults;
+
+    // Empty unless shouldPrintDefaults is set to ALWAYS_PRINT_SPECIFIED_FIELDS.
+    private final Set<FieldDescriptor> includingDefaultValueFields;
+
     private final boolean preservingProtoFieldNames;
     private final boolean omittingInsignificantWhitespace;
+    private final boolean printingEnumsAsInts;
+    private final boolean sortingMapKeys;
 
     private Printer(
-        TypeRegistry registry,
-        boolean includingDefaultValueFields,
+        com.google.protobuf.TypeRegistry registry,
+        TypeRegistry oldRegistry,
+        ShouldPrintDefaults shouldOutputDefaults,
+        Set<FieldDescriptor> includingDefaultValueFields,
         boolean preservingProtoFieldNames,
-        boolean omittingInsignificantWhitespace) {
+        boolean omittingInsignificantWhitespace,
+        boolean printingEnumsAsInts,
+        boolean sortingMapKeys) {
       this.registry = registry;
+      this.oldRegistry = oldRegistry;
+      this.shouldPrintDefaults = shouldOutputDefaults;
       this.includingDefaultValueFields = includingDefaultValueFields;
       this.preservingProtoFieldNames = preservingProtoFieldNames;
       this.omittingInsignificantWhitespace = omittingInsignificantWhitespace;
+      this.printingEnumsAsInts = printingEnumsAsInts;
+      this.sortingMapKeys = sortingMapKeys;
     }
 
     /**
-     * Creates a new {@link Printer} using the given registry. The new Printer
-     * clones all other configurations from the current {@link Printer}.
+     * Creates a new {@link Printer} using the given registry. The new Printer clones all other
+     * configurations from the current {@link Printer}.
      *
-     * @throws IllegalArgumentException if a registry is already set.
+     * @throws IllegalArgumentException if a registry is already set
      */
-    public Printer usingTypeRegistry(TypeRegistry registry) {
-      if (this.registry != TypeRegistry.getEmptyTypeRegistry()) {
+    public Printer usingTypeRegistry(TypeRegistry oldRegistry) {
+      if (this.oldRegistry != TypeRegistry.getEmptyTypeRegistry()
+          || this.registry != com.google.protobuf.TypeRegistry.getEmptyTypeRegistry()) {
+        throw new IllegalArgumentException("Only one registry is allowed.");
+      }
+      return new Printer(
+          com.google.protobuf.TypeRegistry.getEmptyTypeRegistry(),
+          oldRegistry,
+          shouldPrintDefaults,
+          includingDefaultValueFields,
+          preservingProtoFieldNames,
+          omittingInsignificantWhitespace,
+          printingEnumsAsInts,
+          sortingMapKeys);
+    }
+
+    /**
+     * Creates a new {@link Printer} using the given registry. The new Printer clones all other
+     * configurations from the current {@link Printer}.
+     *
+     * @throws IllegalArgumentException if a registry is already set
+     */
+    public Printer usingTypeRegistry(com.google.protobuf.TypeRegistry registry) {
+      if (this.oldRegistry != TypeRegistry.getEmptyTypeRegistry()
+          || this.registry != com.google.protobuf.TypeRegistry.getEmptyTypeRegistry()) {
         throw new IllegalArgumentException("Only one registry is allowed.");
       }
       return new Printer(
           registry,
+          oldRegistry,
+          shouldPrintDefaults,
           includingDefaultValueFields,
           preservingProtoFieldNames,
-          omittingInsignificantWhitespace);
+          omittingInsignificantWhitespace,
+          printingEnumsAsInts,
+          sortingMapKeys);
     }
 
     /**
-     * Creates a new {@link Printer} that will also print fields set to their
-     * defaults. Empty repeated fields and map fields will be printed as well.
-     * The new Printer clones all other configurations from the current
-     * {@link Printer}.
+     * Creates a new {@link Printer} that will always print fields unless they are a message type or
+     * in a oneof.
+     *
+     * <p>Note that this does print Proto2 Optional but does not print Proto3 Optional fields, as
+     * the latter is represented using a synthetic oneof.
+     *
+     * <p>The new Printer clones all other configurations from the current {@link Printer}.
+     *
+     * @deprecated This method is deprecated, and slated for removal in the next Java breaking
+     *     change (5.x). Prefer {@link #alwaysPrintFieldsWithNoPresence}
      */
+    @Deprecated
     public Printer includingDefaultValueFields() {
+      if (shouldPrintDefaults != ShouldPrintDefaults.ONLY_IF_PRESENT) {
+        throw new IllegalStateException(
+            "JsonFormat includingDefaultValueFields has already been set.");
+      }
       return new Printer(
-          registry, true, preservingProtoFieldNames, omittingInsignificantWhitespace);
+          registry,
+          oldRegistry,
+          ShouldPrintDefaults.ALWAYS_PRINT_EXCEPT_MESSAGES_AND_ONEOFS,
+          ImmutableSet.of(),
+          preservingProtoFieldNames,
+          omittingInsignificantWhitespace,
+          printingEnumsAsInts,
+          sortingMapKeys);
+    }
+
+    /**
+     * Creates a new {@link Printer} that will also print default-valued fields if their
+     * FieldDescriptors are found in the supplied set. Empty repeated fields and map fields will be
+     * printed as well, if they match. The new Printer clones all other configurations from the
+     * current {@link Printer}.
+     *
+     * <p>Note that non-repeated message fields or fields in a oneof are not honored if provided
+     * here.
+     */
+    public Printer includingDefaultValueFields(Set<FieldDescriptor> fieldsToAlwaysOutput) {
+      Preconditions.checkArgument(
+          null != fieldsToAlwaysOutput && !fieldsToAlwaysOutput.isEmpty(),
+          "Non-empty Set must be supplied for includingDefaultValueFields.");
+      if (shouldPrintDefaults != ShouldPrintDefaults.ONLY_IF_PRESENT) {
+        throw new IllegalStateException(
+            "JsonFormat includingDefaultValueFields has already been set.");
+      }
+      return new Printer(
+          registry,
+          oldRegistry,
+          ShouldPrintDefaults.ALWAYS_PRINT_SPECIFIED_FIELDS,
+          ImmutableSet.copyOf(fieldsToAlwaysOutput),
+          preservingProtoFieldNames,
+          omittingInsignificantWhitespace,
+          printingEnumsAsInts,
+          sortingMapKeys);
+    }
+
+    /**
+     * Creates a new {@link Printer} that will print any field that does not support presence even
+     * if it would not otherwise be printed (empty repeated fields, empty map fields, and implicit
+     * presence scalars set to their default value). The new Printer clones all other configurations
+     * from the current {@link Printer}.
+     */
+    public Printer alwaysPrintFieldsWithNoPresence() {
+      if (shouldPrintDefaults != ShouldPrintDefaults.ONLY_IF_PRESENT) {
+        throw new IllegalStateException("Only one of the JsonFormat defaults options can be set.");
+      }
+      return new Printer(
+          registry,
+          oldRegistry,
+          ShouldPrintDefaults.ALWAYS_PRINT_WITHOUT_PRESENCE_FIELDS,
+          ImmutableSet.of(),
+          preservingProtoFieldNames,
+          omittingInsignificantWhitespace,
+          printingEnumsAsInts,
+          sortingMapKeys);
+    }
+
+    /**
+     * Creates a new {@link Printer} that prints enum field values as integers instead of as string.
+     * The new Printer clones all other configurations from the current {@link Printer}.
+     */
+    public Printer printingEnumsAsInts() {
+      checkUnsetPrintingEnumsAsInts();
+      return new Printer(
+          registry,
+          oldRegistry,
+          shouldPrintDefaults,
+          includingDefaultValueFields,
+          preservingProtoFieldNames,
+          omittingInsignificantWhitespace,
+          true,
+          sortingMapKeys);
+    }
+
+    private void checkUnsetPrintingEnumsAsInts() {
+      if (printingEnumsAsInts) {
+        throw new IllegalStateException("JsonFormat printingEnumsAsInts has already been set.");
+      }
     }
 
     /**
@@ -160,15 +287,23 @@ public class JsonFormat {
      */
     public Printer preservingProtoFieldNames() {
       return new Printer(
-          registry, includingDefaultValueFields, true, omittingInsignificantWhitespace);
+          registry,
+          oldRegistry,
+          shouldPrintDefaults,
+          includingDefaultValueFields,
+          true,
+          omittingInsignificantWhitespace,
+          printingEnumsAsInts,
+          sortingMapKeys);
     }
 
 
     /**
-     * Create a new  {@link Printer}  that will omit all insignificant whitespace
-     * in the JSON output. This new Printer clones all other configurations from the
-     * current Printer. Insignificant whitespace is defined by the JSON spec as whitespace
-     * that appear between JSON structural elements:
+     * Create a new {@link Printer} that omits insignificant whitespace in the JSON output.
+     * This new Printer clones all other configurations from the current Printer. Insignificant
+     * whitespace is defined by the JSON spec as whitespace that appears between JSON structural
+     * elements:
+     *
      * <pre>
      * ws = *(
      * %x20 /              ; Space
@@ -176,34 +311,69 @@ public class JsonFormat {
      * %x0A /              ; Line feed or New line
      * %x0D )              ; Carriage return
      * </pre>
-     * See <a href="https://tools.ietf.org/html/rfc7159">https://tools.ietf.org/html/rfc7159</a>
-     * current {@link Printer}.
+     *
+     * See <a href="https://tools.ietf.org/html/rfc7159">https://tools.ietf.org/html/rfc7159</a>.
      */
     public Printer omittingInsignificantWhitespace() {
-      return new Printer(registry, includingDefaultValueFields, preservingProtoFieldNames, true);
+      return new Printer(
+          registry,
+          oldRegistry,
+          shouldPrintDefaults,
+          includingDefaultValueFields,
+          preservingProtoFieldNames,
+          true,
+          printingEnumsAsInts,
+          sortingMapKeys);
     }
 
     /**
-     * Converts a protobuf message to JSON format.
+     * Create a new {@link Printer} that will sort the map keys in the JSON output.
      *
-     * @throws InvalidProtocolBufferException if the message contains Any types
-     *         that can't be resolved.
-     * @throws IOException if writing to the output fails.
+     * <p>Use of this modifier is discouraged. The generated JSON messages are equivalent with and
+     * without this option set, but there are some corner use cases that demand a stable output,
+     * while order of map keys is otherwise arbitrary.
+     *
+     * <p>The generated order is not well-defined and should not be depended on, but it's stable.
+     *
+     * <p>This new Printer clones all other configurations from the current {@link Printer}.
+     */
+    public Printer sortingMapKeys() {
+      return new Printer(
+          registry,
+          oldRegistry,
+          shouldPrintDefaults,
+          includingDefaultValueFields,
+          preservingProtoFieldNames,
+          omittingInsignificantWhitespace,
+          printingEnumsAsInts,
+          true);
+    }
+
+    /**
+     * Converts a protobuf message to the proto3 JSON format.
+     *
+     * @throws InvalidProtocolBufferException if the message contains Any types that can't be
+     *     resolved
+     * @throws IOException if writing to the output fails
      */
     public void appendTo(MessageOrBuilder message, Appendable output) throws IOException {
-      // TODO(xiaofeng): Investigate the allocation overhead and optimize for
+      // TODO: Investigate the allocation overhead and optimize for
       // mobile.
       new PrinterImpl(
               registry,
+              oldRegistry,
+              shouldPrintDefaults,
               includingDefaultValueFields,
               preservingProtoFieldNames,
               output,
-              omittingInsignificantWhitespace)
+              omittingInsignificantWhitespace,
+              printingEnumsAsInts,
+              sortingMapKeys)
           .print(message);
     }
 
     /**
-     * Converts a protobuf message to JSON format. Throws exceptions if there
+     * Converts a protobuf message to the proto3 JSON format. Throws exceptions if there
      * are unknown Any types in the message.
      */
     public String print(MessageOrBuilder message) throws InvalidProtocolBufferException {
@@ -224,55 +394,106 @@ public class JsonFormat {
    * Creates a {@link Parser} with default configuration.
    */
   public static Parser parser() {
-    return new Parser(TypeRegistry.getEmptyTypeRegistry());
+    return new Parser(
+        com.google.protobuf.TypeRegistry.getEmptyTypeRegistry(),
+        TypeRegistry.getEmptyTypeRegistry(),
+        false,
+        Parser.DEFAULT_RECURSION_LIMIT);
   }
 
   /**
-   * A Parser parses JSON to protobuf message.
+   * A Parser parses the proto3 JSON format into a protobuf message.
    */
   public static class Parser {
-    private final TypeRegistry registry;
+    private final com.google.protobuf.TypeRegistry registry;
+    private final TypeRegistry oldRegistry;
+    private final boolean ignoringUnknownFields;
+    private final int recursionLimit;
 
-    private Parser(TypeRegistry registry) {
+    // The default parsing recursion limit is aligned with the proto binary parser.
+    private static final int DEFAULT_RECURSION_LIMIT = 100;
+
+    private Parser(
+        com.google.protobuf.TypeRegistry registry,
+        TypeRegistry oldRegistry,
+        boolean ignoreUnknownFields,
+        int recursionLimit) {
       this.registry = registry;
+      this.oldRegistry = oldRegistry;
+      this.ignoringUnknownFields = ignoreUnknownFields;
+      this.recursionLimit = recursionLimit;
     }
 
     /**
-     * Creates a new {@link Parser} using the given registry. The new Parser
-     * clones all other configurations from this Parser.
+     * Creates a new {@link Parser} using the given registry. The new Parser clones all other
+     * configurations from this Parser.
      *
-     * @throws IllegalArgumentException if a registry is already set.
+     * @throws IllegalArgumentException if a registry is already set
      */
-    public Parser usingTypeRegistry(TypeRegistry registry) {
-      if (this.registry != TypeRegistry.getEmptyTypeRegistry()) {
+    public Parser usingTypeRegistry(TypeRegistry oldRegistry) {
+      if (this.oldRegistry != TypeRegistry.getEmptyTypeRegistry()
+          || this.registry != com.google.protobuf.TypeRegistry.getEmptyTypeRegistry()) {
         throw new IllegalArgumentException("Only one registry is allowed.");
       }
-      return new Parser(registry);
+      return new Parser(
+          com.google.protobuf.TypeRegistry.getEmptyTypeRegistry(),
+          oldRegistry,
+          ignoringUnknownFields,
+          recursionLimit);
     }
 
     /**
-     * Parses from JSON into a protobuf message.
+     * Creates a new {@link Parser} using the given registry. The new Parser clones all other
+     * configurations from this Parser.
+     *
+     * @throws IllegalArgumentException if a registry is already set
+     */
+    public Parser usingTypeRegistry(com.google.protobuf.TypeRegistry registry) {
+      if (this.oldRegistry != TypeRegistry.getEmptyTypeRegistry()
+          || this.registry != com.google.protobuf.TypeRegistry.getEmptyTypeRegistry()) {
+        throw new IllegalArgumentException("Only one registry is allowed.");
+      }
+      return new Parser(registry, oldRegistry, ignoringUnknownFields, recursionLimit);
+    }
+
+    /**
+     * Creates a new {@link Parser} configured to not throw an exception when an unknown field is
+     * encountered. The new Parser clones all other configurations from this Parser.
+     */
+    public Parser ignoringUnknownFields() {
+      return new Parser(this.registry, oldRegistry, true, recursionLimit);
+    }
+
+    /**
+     * Parses from the proto3 JSON format into a protobuf message.
      *
      * @throws InvalidProtocolBufferException if the input is not valid JSON
-     *         format or there are unknown fields in the input.
+     *         proto3 format or there are unknown fields in the input.
      */
     public void merge(String json, Message.Builder builder) throws InvalidProtocolBufferException {
-      // TODO(xiaofeng): Investigate the allocation overhead and optimize for
+      // TODO: Investigate the allocation overhead and optimize for
       // mobile.
-      new ParserImpl(registry).merge(json, builder);
+      new ParserImpl(registry, oldRegistry, ignoringUnknownFields, recursionLimit)
+          .merge(json, builder);
     }
 
     /**
-     * Parses from JSON into a protobuf message.
+     * Parses from the proto3 JSON encoding into a protobuf message.
      *
-     * @throws InvalidProtocolBufferException if the input is not valid JSON
-     *         format or there are unknown fields in the input.
-     * @throws IOException if reading from the input throws.
+     * @throws InvalidProtocolBufferException if the input is not valid proto3 JSON
+     *         format or there are unknown fields in the input
+     * @throws IOException if reading from the input throws
      */
     public void merge(Reader json, Message.Builder builder) throws IOException {
-      // TODO(xiaofeng): Investigate the allocation overhead and optimize for
+      // TODO: Investigate the allocation overhead and optimize for
       // mobile.
-      new ParserImpl(registry).merge(json, builder);
+      new ParserImpl(registry, oldRegistry, ignoringUnknownFields, recursionLimit)
+          .merge(json, builder);
+    }
+
+    // For testing only.
+    Parser usingRecursionLimit(int recursionLimit) {
+      return new Parser(registry, oldRegistry, ignoringUnknownFields, recursionLimit);
     }
   }
 
@@ -298,11 +519,17 @@ public class JsonFormat {
     }
 
     /**
-     * Find a type by its full name. Returns null if it cannot be found in
-     * this {@link TypeRegistry}.
+     * Find a type by its full name. Returns null if it cannot be found in this {@link
+     * TypeRegistry}.
      */
+    @Nullable
     public Descriptor find(String name) {
       return types.get(name);
+    }
+
+    @Nullable
+    Descriptor getDescriptorForTypeUrl(String typeUrl) throws InvalidProtocolBufferException {
+      return find(getTypeName(typeUrl));
     }
 
     private final Map<String, Descriptor> types;
@@ -311,31 +538,31 @@ public class JsonFormat {
       this.types = types;
     }
 
-    /**
-     * A Builder is used to build {@link TypeRegistry}.
-     */
+    /** A Builder is used to build {@link TypeRegistry}. */
     public static class Builder {
       private Builder() {}
 
       /**
-       * Adds a message type and all types defined in the same .proto file as
-       * well as all transitively imported .proto files to this {@link Builder}.
+       * Adds a message type and all types defined in the same .proto file as well as all
+       * transitively imported .proto files to this {@link Builder}.
        */
+      @CanIgnoreReturnValue
       public Builder add(Descriptor messageType) {
-        if (types == null) {
-          throw new IllegalStateException("A TypeRegistry.Builer can only be used once.");
+        if (built) {
+          throw new IllegalStateException("A TypeRegistry.Builder can only be used once.");
         }
         addFile(messageType.getFile());
         return this;
       }
 
       /**
-       * Adds message types and all types defined in the same .proto file as
-       * well as all transitively imported .proto files to this {@link Builder}.
+       * Adds message types and all types defined in the same .proto file as well as all
+       * transitively imported .proto files to this {@link Builder}.
        */
+      @CanIgnoreReturnValue
       public Builder add(Iterable<Descriptor> messageTypes) {
-        if (types == null) {
-          throw new IllegalStateException("A TypeRegistry.Builer can only be used once.");
+        if (built) {
+          throw new IllegalStateException("A TypeRegistry.Builder can only be used once.");
         }
         for (Descriptor type : messageTypes) {
           addFile(type.getFile());
@@ -348,10 +575,8 @@ public class JsonFormat {
        * one Builder.
        */
       public TypeRegistry build() {
-        TypeRegistry result = new TypeRegistry(types);
-        // Make sure the built {@link TypeRegistry} is immutable.
-        types = null;
-        return result;
+        built = true;
+        return new TypeRegistry(types);
       }
 
       private void addFile(FileDescriptor file) {
@@ -380,14 +605,15 @@ public class JsonFormat {
         types.put(message.getFullName(), message);
       }
 
-      private final Set<String> files = new HashSet<String>();
-      private Map<String, Descriptor> types = new HashMap<String, Descriptor>();
+      private final Set<String> files = new HashSet<>();
+      private final Map<String, Descriptor> types = new HashMap<>();
+      private boolean built = false;
     }
   }
 
   /**
-   * An interface for json formatting that can be used in
-   * combination with the omittingInsignificantWhitespace() method
+   * An interface for JSON formatting that can be used in
+   * combination with the omittingInsignificantWhitespace() method.
    */
   interface TextGenerator {
     void indent();
@@ -398,7 +624,7 @@ public class JsonFormat {
   }
 
   /**
-   * Format the json without indentation
+   * Format the JSON without indentation
    */
   private static final class CompactTextGenerator implements TextGenerator {
     private final Appendable output;
@@ -407,19 +633,16 @@ public class JsonFormat {
       this.output = output;
     }
 
-    /**
-     * ignored by compact printer
-     */
+    /** ignored by compact printer */
+    @Override
     public void indent() {}
 
-    /**
-     * ignored by compact printer
-     */
+    /** ignored by compact printer */
+    @Override
     public void outdent() {}
 
-    /**
-     * Print text to the output stream.
-     */
+    /** Print text to the output stream. */
+    @Override
     public void print(final CharSequence text) throws IOException {
       output.append(text);
     }
@@ -437,18 +660,17 @@ public class JsonFormat {
     }
 
     /**
-     * Indent text by two spaces.  After calling Indent(), two spaces will be
-     * inserted at the beginning of each line of text.  Indent() may be called
-     * multiple times to produce deeper indents.
+     * Indent text by two spaces. After calling Indent(), two spaces will be inserted at the
+     * beginning of each line of text. Indent() may be called multiple times to produce deeper
+     * indents.
      */
+    @Override
     public void indent() {
       indent.append("  ");
     }
 
-    /**
-     * Reduces the current indent level by two spaces, or crashes if the indent
-     * level is zero.
-     */
+    /** Reduces the current indent level by two spaces, or crashes if the indent level is zero. */
+    @Override
     public void outdent() {
       final int length = indent.length();
       if (length < 2) {
@@ -457,9 +679,8 @@ public class JsonFormat {
       indent.delete(length - 2, length);
     }
 
-    /**
-     * Print text to the output stream.
-     */
+    /** Print text to the output stream. */
+    @Override
     public void print(final CharSequence text) throws IOException {
       final int size = text.length();
       int pos = 0;
@@ -487,12 +708,16 @@ public class JsonFormat {
   }
 
   /**
-   * A Printer converts protobuf messages to JSON format.
+   * A Printer converts protobuf messages to the proto3 JSON format.
    */
   private static final class PrinterImpl {
-    private final TypeRegistry registry;
-    private final boolean includingDefaultValueFields;
+    private final com.google.protobuf.TypeRegistry registry;
+    private final TypeRegistry oldRegistry;
+    private final ShouldPrintDefaults shouldPrintDefaults;
+    private final Set<FieldDescriptor> includingDefaultValueFields;
     private final boolean preservingProtoFieldNames;
+    private final boolean printingEnumsAsInts;
+    private final boolean sortingMapKeys;
     private final TextGenerator generator;
     // We use Gson to help handle string escapes.
     private final Gson gson;
@@ -500,18 +725,26 @@ public class JsonFormat {
     private final CharSequence blankOrNewLine;
 
     private static class GsonHolder {
-      private static final Gson DEFAULT_GSON = new GsonBuilder().disableHtmlEscaping().create();
+      private static final Gson DEFAULT_GSON = new GsonBuilder().create();
     }
 
     PrinterImpl(
-        TypeRegistry registry,
-        boolean includingDefaultValueFields,
+        com.google.protobuf.TypeRegistry registry,
+        TypeRegistry oldRegistry,
+        ShouldPrintDefaults shouldPrintDefaults,
+        Set<FieldDescriptor> includingDefaultValueFields,
         boolean preservingProtoFieldNames,
         Appendable jsonOutput,
-        boolean omittingInsignificantWhitespace) {
+        boolean omittingInsignificantWhitespace,
+        boolean printingEnumsAsInts,
+        boolean sortingMapKeys) {
       this.registry = registry;
+      this.oldRegistry = oldRegistry;
+      this.shouldPrintDefaults = shouldPrintDefaults;
       this.includingDefaultValueFields = includingDefaultValueFields;
       this.preservingProtoFieldNames = preservingProtoFieldNames;
+      this.printingEnumsAsInts = printingEnumsAsInts;
+      this.sortingMapKeys = sortingMapKeys;
       this.gson = GsonHolder.DEFAULT_GSON;
       // json format related properties, determined by printerType
       if (omittingInsignificantWhitespace) {
@@ -629,6 +862,10 @@ public class JsonFormat {
 
     /** Prints google.protobuf.Any */
     private void printAny(MessageOrBuilder message) throws IOException {
+      if (message.getDefaultInstanceForType().equals(message)) {
+        generator.print("{}");
+        return;
+      }
       Descriptor descriptor = message.getDescriptorForType();
       FieldDescriptor typeUrlField = descriptor.findFieldByName("type_url");
       FieldDescriptor valueField = descriptor.findFieldByName("value");
@@ -641,15 +878,17 @@ public class JsonFormat {
         throw new InvalidProtocolBufferException("Invalid Any type.");
       }
       String typeUrl = (String) message.getField(typeUrlField);
-      String typeName = getTypeName(typeUrl);
-      Descriptor type = registry.find(typeName);
+      Descriptor type = registry.getDescriptorForTypeUrl(typeUrl);
       if (type == null) {
-        throw new InvalidProtocolBufferException("Cannot find type for url: " + typeUrl);
+        type = oldRegistry.getDescriptorForTypeUrl(typeUrl);
+        if (type == null) {
+          throw new InvalidProtocolBufferException("Cannot find type for url: " + typeUrl);
+        }
       }
       ByteString content = (ByteString) message.getField(valueField);
       Message contentMessage =
           DynamicMessage.getDefaultInstance(type).getParserForType().parseFrom(content);
-      WellKnownTypePrinter printer = wellKnownTypePrinters.get(typeName);
+      WellKnownTypePrinter printer = wellKnownTypePrinters.get(getTypeName(typeUrl));
       if (printer != null) {
         // If the type is one of the well-known types, we use a special
         // formatting.
@@ -731,7 +970,16 @@ public class JsonFormat {
         throw new InvalidProtocolBufferException("Invalid Value type.");
       }
       for (Map.Entry<FieldDescriptor, Object> entry : fields.entrySet()) {
-        printSingleFieldValue(entry.getKey(), entry.getValue());
+        FieldDescriptor field = entry.getKey();
+        if (field.getType() == FieldDescriptor.Type.DOUBLE) {
+          Double doubleValue = (Double) entry.getValue();
+          if (doubleValue.isNaN() || doubleValue.isInfinite()) {
+            throw new IllegalArgumentException(
+                "google.protobuf.Value cannot encode double values for "
+                + "infinity or nan, because they would be parsed as a string.");
+          }
+        }
+        printSingleFieldValue(field, entry.getValue());
       }
     }
 
@@ -745,8 +993,30 @@ public class JsonFormat {
       printRepeatedFieldValue(field, message.getField(field));
     }
 
+    // Whether a set option means the corresponding field should be printed even if it normally
+    // wouldn't be.
+    private boolean shouldSpeciallyPrint(FieldDescriptor field) {
+      switch (shouldPrintDefaults) {
+        case ONLY_IF_PRESENT:
+          return false;
+        case ALWAYS_PRINT_EXCEPT_MESSAGES_AND_ONEOFS:
+          return !field.hasPresence()
+              || (field.getJavaType() != FieldDescriptor.JavaType.MESSAGE
+                  && field.getContainingOneof() == null);
+        case ALWAYS_PRINT_WITHOUT_PRESENCE_FIELDS:
+          return !field.hasPresence();
+        case ALWAYS_PRINT_SPECIFIED_FIELDS:
+          // For legacy code compatibility, we don't honor non-repeated message or oneof fields even
+          // if they're explicitly requested. :(
+          return !(field.getJavaType() == FieldDescriptor.JavaType.MESSAGE && !field.isRepeated())
+              && field.getContainingOneof() == null
+              && includingDefaultValueFields.contains(field);
+      }
+      throw new AssertionError("Unknown shouldPrintDefaults: " + shouldPrintDefaults);
+    }
+
     /** Prints a regular message with an optional type URL. */
-    private void print(MessageOrBuilder message, String typeUrl) throws IOException {
+    private void print(MessageOrBuilder message, @Nullable String typeUrl) throws IOException {
       generator.print("{" + blankOrNewLine);
       generator.indent();
 
@@ -755,22 +1025,23 @@ public class JsonFormat {
         generator.print("\"@type\":" + blankOrSpace + gson.toJson(typeUrl));
         printedField = true;
       }
-      Map<FieldDescriptor, Object> fieldsToPrint = null;
-      if (includingDefaultValueFields) {
-        fieldsToPrint = new TreeMap<FieldDescriptor, Object>();
-        for (FieldDescriptor field : message.getDescriptorForType().getFields()) {
-          if (field.isOptional()
-              && field.getJavaType() == FieldDescriptor.JavaType.MESSAGE
-              && !message.hasField(field)) {
-            // Always skip empty optional message fields. If not we will recurse indefinitely if
-            // a message has itself as a sub-field.
-            continue;
-          }
-          fieldsToPrint.put(field, message.getField(field));
-        }
-      } else {
+
+      // message.getAllFields() will already contain all of the fields that would be
+      // printed normally (non-empty repeated fields, with-presence fields that are set, implicit
+      // presence fields that have a nonzero value). Loop over all of the fields to add any more
+      // fields that should be printed based on the shouldPrintDefaults setting.
+      Map<FieldDescriptor, Object> fieldsToPrint;
+      if (shouldPrintDefaults == ShouldPrintDefaults.ONLY_IF_PRESENT) {
         fieldsToPrint = message.getAllFields();
+      } else {
+        fieldsToPrint = new TreeMap<FieldDescriptor, Object>(message.getAllFields());
+        for (FieldDescriptor field : message.getDescriptorForType().getFields()) {
+          if (shouldSpeciallyPrint(field)) {
+            fieldsToPrint.put(field, message.getField(field));
+          }
+        }
       }
+
       for (Map.Entry<FieldDescriptor, Object> field : fieldsToPrint.entrySet()) {
         if (printedField) {
           // Add line-endings for the previous field.
@@ -819,7 +1090,6 @@ public class JsonFormat {
       generator.print("]");
     }
 
-    @SuppressWarnings("rawtypes")
     private void printMapFieldValue(FieldDescriptor field, Object value) throws IOException {
       Descriptor type = field.getMessageType();
       FieldDescriptor keyField = type.findFieldByName("key");
@@ -829,8 +1099,32 @@ public class JsonFormat {
       }
       generator.print("{" + blankOrNewLine);
       generator.indent();
+
+      @SuppressWarnings("unchecked") // Object guaranteed to be a List for a map field.
+      Collection<Object> elements = (List<Object>) value;
+      if (sortingMapKeys && !elements.isEmpty()) {
+        Comparator<Object> cmp = null;
+        if (keyField.getType() == FieldDescriptor.Type.STRING) {
+          cmp = new Comparator<Object>() {
+            @Override
+            public int compare(final Object o1, final Object o2) {
+              ByteString s1 = ByteString.copyFromUtf8((String) o1);
+              ByteString s2 = ByteString.copyFromUtf8((String) o2);
+              return ByteString.unsignedLexicographicalComparator().compare(s1, s2);
+            }
+          };
+        }
+        TreeMap<Object, Object> tm = new TreeMap<>(cmp);
+        for (Object element : elements) {
+          Message entry = (Message) element;
+          Object entryKey = entry.getField(keyField);
+          tm.put(entryKey, element);
+        }
+        elements = tm.values();
+      }
+
       boolean printedElement = false;
-      for (Object element : (List) value) {
+      for (Object element : elements) {
         Message entry = (Message) element;
         Object entryKey = entry.getField(keyField);
         Object entryValue = entry.getField(valueField);
@@ -856,10 +1150,10 @@ public class JsonFormat {
     }
 
     /**
-     * Prints a field's value in JSON format.
+     * Prints a field's value in the proto3 JSON format.
      *
      * @param alwaysWithQuotes whether to always add double-quotes to primitive
-     *        types.
+     *        types
      */
     private void printSingleFieldValue(
         final FieldDescriptor field, final Object value, boolean alwaysWithQuotes)
@@ -944,7 +1238,7 @@ public class JsonFormat {
           if (alwaysWithQuotes) {
             generator.print("\"");
           }
-          generator.print(unsignedToString((Integer) value));
+          generator.print(Integer.toUnsignedString((int) value));
           if (alwaysWithQuotes) {
             generator.print("\"");
           }
@@ -952,7 +1246,7 @@ public class JsonFormat {
 
         case UINT64:
         case FIXED64:
-          generator.print("\"" + unsignedToString((Long) value) + "\"");
+          generator.print("\"" + Long.toUnsignedString((long) value) + "\"");
           break;
 
         case STRING:
@@ -977,7 +1271,7 @@ public class JsonFormat {
               generator.print("\"");
             }
           } else {
-            if (((EnumValueDescriptor) value).getIndex() == -1) {
+            if (printingEnumsAsInts || ((EnumValueDescriptor) value).getIndex() == -1) {
               generator.print(String.valueOf(((EnumValueDescriptor) value).getNumber()));
             } else {
               generator.print("\"" + ((EnumValueDescriptor) value).getName() + "\"");
@@ -993,26 +1287,6 @@ public class JsonFormat {
     }
   }
 
-  /** Convert an unsigned 32-bit integer to a string. */
-  private static String unsignedToString(final int value) {
-    if (value >= 0) {
-      return Integer.toString(value);
-    } else {
-      return Long.toString(value & 0x00000000FFFFFFFFL);
-    }
-  }
-
-  /** Convert an unsigned 64-bit integer to a string. */
-  private static String unsignedToString(final long value) {
-    if (value >= 0) {
-      return Long.toString(value);
-    } else {
-      // Pull off the most-significant bit so that BigInteger doesn't think
-      // the number is negative, then set it again using setBit().
-      return BigInteger.valueOf(value & Long.MAX_VALUE).setBit(Long.SIZE - 1).toString();
-    }
-  }
-
   private static String getTypeName(String typeUrl) throws InvalidProtocolBufferException {
     String[] parts = typeUrl.split("/");
     if (parts.length == 1) {
@@ -1022,30 +1296,52 @@ public class JsonFormat {
   }
 
   private static class ParserImpl {
-    private final TypeRegistry registry;
-    private final JsonParser jsonParser;
+    private final com.google.protobuf.TypeRegistry registry;
+    private final TypeRegistry oldRegistry;
+    private final boolean ignoringUnknownFields;
+    private final int recursionLimit;
+    private int currentDepth;
 
-    ParserImpl(TypeRegistry registry) {
+    ParserImpl(
+        com.google.protobuf.TypeRegistry registry,
+        TypeRegistry oldRegistry,
+        boolean ignoreUnknownFields,
+        int recursionLimit) {
       this.registry = registry;
-      this.jsonParser = new JsonParser();
+      this.oldRegistry = oldRegistry;
+      this.ignoringUnknownFields = ignoreUnknownFields;
+      this.recursionLimit = recursionLimit;
+      this.currentDepth = 0;
     }
 
     void merge(Reader json, Message.Builder builder) throws IOException {
-      JsonReader reader = new JsonReader(json);
-      reader.setLenient(false);
-      merge(jsonParser.parse(reader), builder);
+      try {
+        JsonReader reader = new JsonReader(json);
+        reader.setLenient(false);
+        merge(JsonParser.parseReader(reader), builder);
+      } catch (JsonIOException e) {
+        // Unwrap IOException.
+        if (e.getCause() instanceof IOException) {
+          throw (IOException) e.getCause();
+        } else {
+          throw new InvalidProtocolBufferException(e.getMessage(), e);
+        }
+      } catch (RuntimeException e) {
+        // We convert all exceptions from JSON parsing to our own exceptions.
+        throw new InvalidProtocolBufferException(e.getMessage(), e);
+      }
     }
 
     void merge(String json, Message.Builder builder) throws InvalidProtocolBufferException {
       try {
         JsonReader reader = new JsonReader(new StringReader(json));
         reader.setLenient(false);
-        merge(jsonParser.parse(reader), builder);
-      } catch (InvalidProtocolBufferException e) {
-        throw e;
-      } catch (Exception e) {
+        merge(JsonParser.parseReader(reader), builder);
+      } catch (RuntimeException e) {
         // We convert all exceptions from JSON parsing to our own exceptions.
-        throw new InvalidProtocolBufferException(e.getMessage());
+        InvalidProtocolBufferException toThrow = new InvalidProtocolBufferException(e.getMessage());
+        toThrow.initCause(e);
+        throw toThrow;
       }
     }
 
@@ -1191,6 +1487,9 @@ public class JsonFormat {
         }
         FieldDescriptor field = fieldNameMap.get(entry.getKey());
         if (field == null) {
+          if (ignoringUnknownFields) {
+            continue;
+          }
           throw new InvalidProtocolBufferException(
               "Cannot find field: "
                   + entry.getKey()
@@ -1219,14 +1518,20 @@ public class JsonFormat {
         throw new InvalidProtocolBufferException("Expect message object but got: " + json);
       }
       JsonObject object = (JsonObject) json;
+      if (object.entrySet().isEmpty()) {
+        return; // builder never modified, so it will end up building the default instance of Any
+      }
       JsonElement typeUrlElement = object.get("@type");
       if (typeUrlElement == null) {
         throw new InvalidProtocolBufferException("Missing type url when parsing: " + json);
       }
       String typeUrl = typeUrlElement.getAsString();
-      Descriptor contentType = registry.find(getTypeName(typeUrl));
+      Descriptor contentType = registry.getDescriptorForTypeUrl(typeUrl);
       if (contentType == null) {
-        throw new InvalidProtocolBufferException("Cannot resolve type: " + typeUrl);
+        contentType = oldRegistry.getDescriptorForTypeUrl(typeUrl);
+        if (contentType == null) {
+          throw new InvalidProtocolBufferException("Cannot resolve type: " + typeUrl);
+        }
       }
       builder.setField(typeUrlField, typeUrl);
       Message.Builder contentBuilder =
@@ -1254,8 +1559,11 @@ public class JsonFormat {
       try {
         Timestamp value = Timestamps.parse(json.getAsString());
         builder.mergeFrom(value.toByteString());
-      } catch (ParseException e) {
-        throw new InvalidProtocolBufferException("Failed to parse timestamp: " + json);
+      } catch (ParseException | UnsupportedOperationException e) {
+        InvalidProtocolBufferException ex = new InvalidProtocolBufferException(
+            "Failed to parse timestamp: " + json);
+        ex.initCause(e);
+        throw ex;
       }
     }
 
@@ -1264,8 +1572,11 @@ public class JsonFormat {
       try {
         Duration value = Durations.parse(json.getAsString());
         builder.mergeFrom(value.toByteString());
-      } catch (ParseException e) {
-        throw new InvalidProtocolBufferException("Failed to parse duration: " + json);
+      } catch (ParseException | UnsupportedOperationException e) {
+        InvalidProtocolBufferException ex = new InvalidProtocolBufferException(
+            "Failed to parse duration: " + json);
+        ex.initCause(e);
+        throw ex;
       }
     }
 
@@ -1311,6 +1622,9 @@ public class JsonFormat {
         Message.Builder listBuilder = builder.newBuilderForField(field);
         merge(json, listBuilder);
         builder.setField(field, listBuilder.build());
+      } else if (json instanceof JsonNull) {
+        builder.setField(
+            type.findFieldByName("null_value"), NullValue.NULL_VALUE.getValueDescriptor());
       } else {
         throw new IllegalStateException("Unexpected json data: " + json);
       }
@@ -1338,16 +1652,6 @@ public class JsonFormat {
           throw new InvalidProtocolBufferException(
               "Field " + field.getFullName() + " has already been set.");
         }
-        if (field.getContainingOneof() != null
-            && builder.getOneofFieldDescriptor(field.getContainingOneof()) != null) {
-          FieldDescriptor other = builder.getOneofFieldDescriptor(field.getContainingOneof());
-          throw new InvalidProtocolBufferException(
-              "Cannot set field "
-                  + field.getFullName()
-                  + " because another field "
-                  + other.getFullName()
-                  + " belonging to the same oneof has already been set ");
-        }
       }
       if (field.isRepeated() && json instanceof JsonNull) {
         // We allow "null" as value for all field types and treat it as if the
@@ -1358,9 +1662,12 @@ public class JsonFormat {
         mergeMapField(field, json, builder);
       } else if (field.isRepeated()) {
         mergeRepeatedField(field, json, builder);
+      } else if (field.getContainingOneof() != null) {
+        mergeOneofField(field, json, builder);
       } else {
         Object value = parseFieldValue(field, json, builder);
         if (value != null) {
+          // A field interpreted as "null" is means it's treated as absent.
           builder.setField(field, value);
         }
       }
@@ -1383,7 +1690,11 @@ public class JsonFormat {
         Object key = parseFieldValue(keyField, new JsonPrimitive(entry.getKey()), entryBuilder);
         Object value = parseFieldValue(valueField, entry.getValue(), entryBuilder);
         if (value == null) {
-          throw new InvalidProtocolBufferException("Map value cannot be null.");
+          if (ignoringUnknownFields && valueField.getType() == FieldDescriptor.Type.ENUM) {
+            continue;
+          } else {
+            throw new InvalidProtocolBufferException("Map value cannot be null.");
+          }
         }
         entryBuilder.setField(keyField, key);
         entryBuilder.setField(valueField, value);
@@ -1391,56 +1702,41 @@ public class JsonFormat {
       }
     }
 
-    /**
-     * Gets the default value for a field type. Note that we use proto3
-     * language defaults and ignore any default values set through the
-     * proto "default" option.
-     */
-    private Object getDefaultValue(FieldDescriptor field, Message.Builder builder) {
-      switch (field.getType()) {
-        case INT32:
-        case SINT32:
-        case SFIXED32:
-        case UINT32:
-        case FIXED32:
-          return 0;
-        case INT64:
-        case SINT64:
-        case SFIXED64:
-        case UINT64:
-        case FIXED64:
-          return 0L;
-        case FLOAT:
-          return 0.0f;
-        case DOUBLE:
-          return 0.0;
-        case BOOL:
-          return false;
-        case STRING:
-          return "";
-        case BYTES:
-          return ByteString.EMPTY;
-        case ENUM:
-          return field.getEnumType().getValues().get(0);
-        case MESSAGE:
-        case GROUP:
-          return builder.newBuilderForField(field).getDefaultInstanceForType();
-        default:
-          throw new IllegalStateException("Invalid field type: " + field.getType());
+    private void mergeOneofField(FieldDescriptor field, JsonElement json, Message.Builder builder)
+        throws InvalidProtocolBufferException {
+      Object value = parseFieldValue(field, json, builder);
+      if (value == null) {
+        // A field interpreted as "null" is means it's treated as absent.
+        return;
       }
+      if (builder.getOneofFieldDescriptor(field.getContainingOneof()) != null) {
+        throw new InvalidProtocolBufferException(
+            "Cannot set field "
+                + field.getFullName()
+                + " because another field "
+                + builder.getOneofFieldDescriptor(field.getContainingOneof()).getFullName()
+                + " belonging to the same oneof has already been set ");
+      }
+      builder.setField(field, value);
     }
 
     private void mergeRepeatedField(
         FieldDescriptor field, JsonElement json, Message.Builder builder)
         throws InvalidProtocolBufferException {
       if (!(json instanceof JsonArray)) {
-        throw new InvalidProtocolBufferException("Expect an array but found: " + json);
+        throw new InvalidProtocolBufferException(
+            "Expected an array for " + field.getName() + " but found " + json);
       }
       JsonArray array = (JsonArray) json;
       for (int i = 0; i < array.size(); ++i) {
         Object value = parseFieldValue(field, array.get(i), builder);
         if (value == null) {
-          throw new InvalidProtocolBufferException("Repeated field elements cannot be null");
+          if (ignoringUnknownFields && field.getType() == FieldDescriptor.Type.ENUM) {
+            continue;
+          } else {
+            throw new InvalidProtocolBufferException(
+                "Repeated field elements cannot be null in field: " + field.getFullName());
+          }
         }
         builder.addRepeatedField(field, value);
       }
@@ -1449,7 +1745,7 @@ public class JsonFormat {
     private int parseInt32(JsonElement json) throws InvalidProtocolBufferException {
       try {
         return Integer.parseInt(json.getAsString());
-      } catch (Exception e) {
+      } catch (RuntimeException e) {
         // Fall through.
       }
       // JSON doesn't distinguish between integer values and floating point values so "1" and
@@ -1458,15 +1754,18 @@ public class JsonFormat {
       try {
         BigDecimal value = new BigDecimal(json.getAsString());
         return value.intValueExact();
-      } catch (Exception e) {
-        throw new InvalidProtocolBufferException("Not an int32 value: " + json);
+      } catch (RuntimeException e) {
+        InvalidProtocolBufferException ex = new InvalidProtocolBufferException(
+            "Not an int32 value: " + json);
+        ex.initCause(e);
+        throw ex;
       }
     }
 
     private long parseInt64(JsonElement json) throws InvalidProtocolBufferException {
       try {
         return Long.parseLong(json.getAsString());
-      } catch (Exception e) {
+      } catch (RuntimeException e) {
         // Fall through.
       }
       // JSON doesn't distinguish between integer values and floating point values so "1" and
@@ -1475,8 +1774,11 @@ public class JsonFormat {
       try {
         BigDecimal value = new BigDecimal(json.getAsString());
         return value.longValueExact();
-      } catch (Exception e) {
-        throw new InvalidProtocolBufferException("Not an int32 value: " + json);
+      } catch (RuntimeException e) {
+        InvalidProtocolBufferException ex = new InvalidProtocolBufferException(
+            "Not an int64 value: " + json);
+        ex.initCause(e);
+        throw ex;
       }
     }
 
@@ -1487,9 +1789,7 @@ public class JsonFormat {
           throw new InvalidProtocolBufferException("Out of range uint32 value: " + json);
         }
         return (int) result;
-      } catch (InvalidProtocolBufferException e) {
-        throw e;
-      } catch (Exception e) {
+      } catch (RuntimeException e) {
         // Fall through.
       }
       // JSON doesn't distinguish between integer values and floating point values so "1" and
@@ -1498,17 +1798,19 @@ public class JsonFormat {
       try {
         BigDecimal decimalValue = new BigDecimal(json.getAsString());
         BigInteger value = decimalValue.toBigIntegerExact();
-        if (value.signum() < 0 || value.compareTo(new BigInteger("FFFFFFFF", 16)) > 0) {
+        if (value.signum() < 0 || value.compareTo(MAX_UINT32) > 0) {
           throw new InvalidProtocolBufferException("Out of range uint32 value: " + json);
         }
         return value.intValue();
-      } catch (InvalidProtocolBufferException e) {
-        throw e;
-      } catch (Exception e) {
-        throw new InvalidProtocolBufferException("Not an uint32 value: " + json);
+      } catch (RuntimeException e) {
+        InvalidProtocolBufferException ex = new InvalidProtocolBufferException(
+            "Not an uint32 value: " + json);
+        ex.initCause(e);
+        throw ex;
       }
     }
 
+    private static final BigInteger MAX_UINT32 = new BigInteger("FFFFFFFF", 16);
     private static final BigInteger MAX_UINT64 = new BigInteger("FFFFFFFFFFFFFFFF", 16);
 
     private long parseUint64(JsonElement json) throws InvalidProtocolBufferException {
@@ -1519,10 +1821,11 @@ public class JsonFormat {
           throw new InvalidProtocolBufferException("Out of range uint64 value: " + json);
         }
         return value.longValue();
-      } catch (InvalidProtocolBufferException e) {
-        throw e;
-      } catch (Exception e) {
-        throw new InvalidProtocolBufferException("Not an uint64 value: " + json);
+      } catch (RuntimeException e) {
+        InvalidProtocolBufferException ex = new InvalidProtocolBufferException(
+            "Not an uint64 value: " + json);
+        ex.initCause(e);
+        throw ex;
       }
     }
 
@@ -1559,10 +1862,11 @@ public class JsonFormat {
           throw new InvalidProtocolBufferException("Out of range float value: " + json);
         }
         return (float) value;
-      } catch (InvalidProtocolBufferException e) {
+      } catch (RuntimeException e) {
+        InvalidProtocolBufferException ex = new InvalidProtocolBufferException(
+            "Not a float value: " + json);
+        ex.initCause(e);
         throw e;
-      } catch (Exception e) {
-        throw new InvalidProtocolBufferException("Not a float value: " + json);
       }
     }
 
@@ -1592,10 +1896,11 @@ public class JsonFormat {
           throw new InvalidProtocolBufferException("Out of range double value: " + json);
         }
         return value.doubleValue();
-      } catch (InvalidProtocolBufferException e) {
-        throw e;
-      } catch (Exception e) {
-        throw new InvalidProtocolBufferException("Not an double value: " + json);
+      } catch (RuntimeException e) {
+        InvalidProtocolBufferException ex = new InvalidProtocolBufferException(
+            "Not a double value: " + json);
+        ex.initCause(e);
+        throw ex;
       }
     }
 
@@ -1603,15 +1908,15 @@ public class JsonFormat {
       return json.getAsString();
     }
 
-    private ByteString parseBytes(JsonElement json) throws InvalidProtocolBufferException {
-      String encoded = json.getAsString();
-      if (encoded.length() % 4 != 0) {
-        throw new InvalidProtocolBufferException(
-            "Bytes field is not encoded in standard BASE64 with paddings: " + encoded);
+    private ByteString parseBytes(JsonElement json) {
+      try {
+        return ByteString.copyFrom(BaseEncoding.base64().decode(json.getAsString()));
+      } catch (IllegalArgumentException e) {
+        return ByteString.copyFrom(BaseEncoding.base64Url().decode(json.getAsString()));
       }
-      return ByteString.copyFrom(BaseEncoding.base64().decode(json.getAsString()));
     }
 
+    @Nullable
     private EnumValueDescriptor parseEnum(EnumDescriptor enumDescriptor, JsonElement json)
         throws InvalidProtocolBufferException {
       String value = json.getAsString();
@@ -1620,10 +1925,10 @@ public class JsonFormat {
         // Try to interpret the value as a number.
         try {
           int numericValue = parseInt32(json);
-          if (enumDescriptor.getFile().getSyntax() == FileDescriptor.Syntax.PROTO3) {
-            result = enumDescriptor.findValueByNumberCreatingIfUnknown(numericValue);
-          } else {
+          if (enumDescriptor.isClosed()) {
             result = enumDescriptor.findValueByNumber(numericValue);
+          } else {
+            result = enumDescriptor.findValueByNumberCreatingIfUnknown(numericValue);
           }
         } catch (InvalidProtocolBufferException e) {
           // Fall through. This exception is about invalid int32 value we get from parseInt32() but
@@ -1631,7 +1936,9 @@ public class JsonFormat {
           // an exception later.
         }
 
-        if (result == null) {
+        // todo(elharo): if we are ignoring unknown fields, shouldn't we still
+        // throw InvalidProtocolBufferException for a non-numeric value here?
+        if (result == null && !ignoringUnknownFields) {
           throw new InvalidProtocolBufferException(
               "Invalid enum value: " + value + " for enum type: " + enumDescriptor.getFullName());
         }
@@ -1639,6 +1946,7 @@ public class JsonFormat {
       return result;
     }
 
+    @Nullable
     private Object parseFieldValue(FieldDescriptor field, JsonElement json, Message.Builder builder)
         throws InvalidProtocolBufferException {
       if (json instanceof JsonNull) {
@@ -1654,6 +1962,14 @@ public class JsonFormat {
           return field.getEnumType().findValueByNumber(0);
         }
         return null;
+      } else if (json instanceof JsonObject) {
+        if (field.getType() != FieldDescriptor.Type.MESSAGE
+            && field.getType() != FieldDescriptor.Type.GROUP) {
+          // If the field type is primitive, but the json type is JsonObject rather than
+          // JsonElement, throw a type mismatch error.
+          throw new InvalidProtocolBufferException(
+              String.format("Invalid value: %s for expected type: %s", json, field.getType()));
+        }
       }
       switch (field.getType()) {
         case INT32:
@@ -1694,8 +2010,13 @@ public class JsonFormat {
 
         case MESSAGE:
         case GROUP:
+          if (currentDepth >= recursionLimit) {
+            throw new InvalidProtocolBufferException("Hit recursion limit.");
+          }
+          ++currentDepth;
           Message.Builder subBuilder = builder.newBuilderForField(field);
           merge(json, subBuilder);
+          --currentDepth;
           return subBuilder.build();
 
         default:

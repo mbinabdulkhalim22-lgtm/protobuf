@@ -1,4 +1,4 @@
-;;; protobuf-mode.el --- major mode for editing protocol buffers.
+;;; protobuf-mode.el --- major mode for editing protocol buffers.  -*- lexical-binding: t; -*-
 
 ;; Author: Alexandre Vassalotti <alexandre@peadrop.com>
 ;; Created: 23-Apr-2009
@@ -66,10 +66,13 @@
 (require 'cc-mode)
 
 (eval-when-compile
+  (and (= emacs-major-version 24)
+       (>= emacs-minor-version 4)
+       (require 'cl-lib))
   (require 'cc-langs)
   (require 'cc-fonts))
 
-;; This mode does not inherit properties from other modes. So, we do not use 
+;; This mode does not inherit properties from other modes. So, we do not use
 ;; the usual `c-add-language' function.
 (eval-and-compile
   (put 'protobuf-mode 'c-mode-prefix "protobuf-"))
@@ -84,7 +87,7 @@
              "string" "bytes" "group"))
 
 (c-lang-defconst c-modifier-kwds
-  protobuf '("required" "optional" "repeated"))
+  protobuf '("required" "optional" "repeated" "oneof"))
 
 (c-lang-defconst c-class-decl-kwds
   protobuf '("message" "enum" "service"))
@@ -93,7 +96,7 @@
   protobuf '("true" "false"))
 
 (c-lang-defconst c-other-decl-kwds
-  protobuf '("package" "import"))
+  protobuf '("package" "import" "syntax" "edition"))
 
 (c-lang-defconst c-other-kwds
   protobuf '("default" "max"))
@@ -109,7 +112,7 @@
   protobuf '("extensions" "to" "reserved"))
 
 (c-lang-defconst c-typeless-decl-kwds
-  protobuf '("extend" "rpc" "option" "returns"))
+  protobuf '("extend" "rpc" "stream" "option" "returns"))
 
 
 ;; Here we remove default syntax for loops, if-statements and other C
@@ -190,7 +193,7 @@
 ;;;###autoload (add-to-list 'auto-mode-alist '("\\.proto\\'" . protobuf-mode))
 
 ;;;###autoload
-(defun protobuf-mode ()
+(define-derived-mode protobuf-mode prog-mode "Protocol-Buffers"
   "Major mode for editing Protocol Buffers description language.
 
 The hook `c-mode-common-hook' is run with no argument at mode
@@ -198,22 +201,16 @@ initialization, then `protobuf-mode-hook'.
 
 Key bindings:
 \\{protobuf-mode-map}"
-  (interactive)
-  (kill-all-local-variables)
-  (set-syntax-table protobuf-mode-syntax-table)
-  (setq major-mode 'protobuf-mode
-        mode-name "Protocol-Buffers"
-        local-abbrev-table protobuf-mode-abbrev-table
-        abbrev-mode t)
-  (use-local-map protobuf-mode-map)
+  :after-hook (c-update-modeline)
+  (setq abbrev-mode t)
   (c-initialize-cc-mode t)
-  (if (fboundp 'c-make-emacs-variables-local)
-      (c-make-emacs-variables-local))
   (c-init-language-vars protobuf-mode)
   (c-common-init 'protobuf-mode)
-  (easy-menu-add protobuf-menu)
-  (c-run-mode-hooks 'c-mode-common-hook 'protobuf-mode-hook)
-  (c-update-modeline))
+  (setq imenu-generic-expression
+	    '(("Message" "^[[:space:]]*message[[:space:]]+\\([[:alnum:]]+\\)" 1)
+          ("Enum" "^[[:space:]]*enum[[:space:]]+\\([[:alnum:]]+\\)" 1)
+          ("Service" "^[[:space:]]*service[[:space:]]+\\([[:alnum:]]+\\)" 1)))
+  (c-run-mode-hooks 'c-mode-common-hook))
 
 (provide 'protobuf-mode)
 
